@@ -1,0 +1,200 @@
+name: Build Android Debug APK
+
+# Compile a private Android/KMP project on FREE Linux runners and report the
+# result as a GitHub issue.
+#
+# A debug APK is deliberate: it needs no keystore, so no signing secret ever
+# comes near this repo, and it is exactly what the emulator wants. Release
+# signing stays where the keys are.
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: 'owner/repo to build (may be private)'
+        required: true
+        default: 'oranblock/skirmish-multiplatform'
+      ref:
+        description: 'branch, tag or SHA'
+        required: true
+        default: 'main'
+      gradle_task:
+        description: 'Gradle task producing the APK'
+        required: false
+        default: ':app:assembleDebug'
+      run_tests:
+        description: 'Also run unit tests (true/false)'
+        required: false
+        default: 'false'
+
+concurrency:
+  group: build-android-${{ inputs.source_repo }}-${{ inputs.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+
+    steps:
+      - name: Checkout harness
+        uses: actions/checkout@v4
+
+      - name: Checkout source project
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repo }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          path: src
+          fetch-depth: 1
+
+      - name: Record what we are building
+        id: meta
+        working-directory: src
+        run: |
+          set -euo pipefail
+          echo "sha=$(git rev-parse --short HEAD)"              >> "$GITHUB_OUTPUT"
+          echo "subject=$(git log -1 --format=%s | tr -d '\r')" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Build
+        id: build
+        working-directory: src
+        run: |
+          # set +e: GitHub runs steps with bash -e, so a failing build would exit
+          # before rc is captured and nothing useful would be reported.
+          set +e
+          set -uo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          # Output to a FILE, not the public job log: a Kotlin error quotes source
+          # lines, and this repo is public while the source is not.
+          ./gradlew ${{ inputs.gradle_task }} --no-daemon \
+            > "$GITHUB_WORKSPACE/out/gradle.log" 2>&1
+          rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          grep -E 'BUILD SUCCESSFUL|BUILD FAILED' "$GITHUB_WORKSPACE/out/gradle.log" | tail -1
+          grep -cE '^e: ' "$GITHUB_WORKSPACE/out/gradle.log" | sed 's/^/kotlin error lines: /'
+          exit $rc
+
+      - name: Unit tests
+        if: inputs.run_tests == 'true'
+        working-directory: src
+        run: |
+          set +e
+          ./gradlew testDebugUnitTest --no-daemon \
+            >> "$GITHUB_WORKSPACE/out/gradle.log" 2>&1
+          echo "tests rc=$?"
+          exit 0
+
+      - name: Collect APK
+        if: success()
+        id: pkg
+        run: |
+          set -euo pipefail
+          APK=$(find src -path '*/outputs/apk/*' -name '*.apk' | head -1)
+          [ -n "$APK" ] || { echo "::error::no apk produced"; exit 1; }
+          OUT="$GITHUB_WORKSPACE/out/app-debug-${{ steps.meta.outputs.sha }}.apk"
+          cp "$APK" "$OUT"
+          echo "name=$(basename "$OUT")" >> "$GITHUB_OUTPUT"
+          echo "size=$(du -h "$OUT" | cut -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Send log to Telegram (private)
+        if: always()
+        run: |
+          set +e
+          [ -f out/gradle.log ] || exit 0
+          [ -n "${TELEGRAM_BOT_TOKEN:-}" ] || exit 0
+          ICON='❌'; [ "${{ job.status }}" = success ] && ICON='✅'
+          curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
+            -F chat_id="${TELEGRAM_CHAT_ID}" -F document="@out/gradle.log" \
+            -F caption="${ICON} ${{ job.status }} · ${{ inputs.source_repo }}@${{ steps.meta.outputs.sha }}" \
+            -o /dev/null
+          exit 0
+
+      - name: Stash log in a secret gist
+        id: gist
+        if: always() && env.GIST_TOKEN != ''
+        run: |
+          set +e
+          [ -f out/gradle.log ] || exit 0
+          mkdir -p out/trimmed
+          { grep -nE '^e: |error:|BUILD (SUCCESSFUL|FAILED)' out/gradle.log | head -200
+            echo "--- tail ---"; tail -60 out/gradle.log; } > out/trimmed/gradle.log
+          # NOT --secret: that flag does not exist. Gists are secret by DEFAULT and
+          # the flag is --public to opt out; passing --secret prints usage, exits 1.
+          URL=$(GH_TOKEN="$GIST_TOKEN" gh gist create \
+                  -d "android build ${{ inputs.source_repo }}@${{ steps.meta.outputs.sha }}" \
+                  out/trimmed/gradle.log 2>&1 | tail -1)
+          case "$URL" in
+            https://gist.github.com/*) echo "gist=$URL" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::warning::gist creation failed: $URL" ;;
+          esac
+          exit 0
+
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: out/*.apk
+          retention-days: 14
+
+      - name: Report as issue
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const ok = '${{ job.status }}' === 'success';
+            const sha = '${{ steps.meta.outputs.sha }}';
+            const subject = ${{ toJSON(steps.meta.outputs.subject) }};
+            const gist = '${{ steps.gist.outputs.gist }}';
+            const apk = '${{ steps.pkg.outputs.name }}';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            // Error TEXT is deliberately absent: this repo is public and compiler
+            // errors quote private source. Counts and file names only.
+            let detail = '';
+            if (fs.existsSync('out/gradle.log')) {
+              const lines = fs.readFileSync('out/gradle.log', 'utf8').split('\n');
+              const errs = lines.filter(l => /^e: |error:/.test(l));
+              const files = [...new Set(errs
+                .map(l => (l.match(/([A-Za-z0-9_+-]+\.(kt|java|xml)):/) || [])[1])
+                .filter(Boolean))];
+              detail = `\n**gradle.log** — ${errs.length} error line(s)`;
+              if (files.length) detail += `\nfiles: ${files.map(x => '`' + x + '`').join(', ')}`;
+            }
+
+            const body = [
+              `**${ok ? 'BUILD SUCCEEDED' : 'BUILD FAILED'}**`, ``,
+              `| | |`, `|---|---|`,
+              `| source | \`${{ inputs.source_repo }}\` @ \`${sha}\` |`,
+              `| commit | ${subject} |`,
+              `| run | [${context.runId}](${runUrl}) |`,
+              ok && apk ? `| apk | \`${apk}\` (${{ steps.pkg.outputs.size }}) |` : ``,
+              gist ? `| log | ${gist} |` : ``,
+              ``, detail, ``,
+              ok ? `Test it: \`gh workflow run "Android Emulator Test & Report" --repo ${context.repo.owner}/${context.repo.repo} -f artifact_run_id=${context.runId} -f package=<app id> -f flow=smoke\`` : ``,
+              ``,
+              `<sub>Error text is not posted here: this repo is public and compiler errors quote private source.</sub>`,
+            ].filter(Boolean).join('\n');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner, repo: context.repo.repo,
+              title: `${ok ? '✅' : '❌'} android build · ${{ inputs.source_repo }}@${sha}`,
+              body,
+            });
