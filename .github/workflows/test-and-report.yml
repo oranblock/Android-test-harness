@@ -101,7 +101,10 @@ jobs:
           if [ -n "${{ inputs.apk_url }}" ]; then
             curl -fSL "${{ inputs.apk_url }}" -o app_dir/app.apk
           fi
-          APK=$(find app_dir -name '*.apk' | head -n1)
+          # -type f matters: `gh run download` creates a DIRECTORY named after the
+          # artifact with the file inside it, so a bare -name '*.apk' matches the
+          # directory and adb fails with "copy_to_file: ...apk: Is a directory".
+          APK=$(find app_dir -type f -name '*.apk' | head -n1)
           [ -n "$APK" ] || { echo "::error::no .apk found"; exit 1; }
           echo "APK=$APK" >> "$GITHUB_ENV"
           ls -la "$APK"
