@@ -1,0 +1,168 @@
+name: Android Emulator Test & Report
+
+# Run ANY Android APK on an emulator, screenshot every step, report to Telegram.
+#
+# Runs on ubuntu-latest, which is the point: Linux runners are the cheapest
+# GitHub offers (1x, vs 10x for macOS), so an Android sweep costs a tenth of the
+# equivalent iOS one — and unlike iOS CI, `adb shell input` means taps work here.
+on:
+  workflow_dispatch:
+    inputs:
+      apk_url:
+        description: 'Direct download URL for a debug APK. Blank if using artifact_run_id.'
+        required: false
+        default: ''
+      artifact_run_id:
+        description: 'Run id in THIS repo whose artifact holds the APK. Artifacts need auth, so a plain URL cannot fetch them.'
+        required: false
+        default: ''
+      package:
+        description: 'Application id, e.g. com.example.app'
+        required: true
+      flow:
+        description: 'Flow file under flows/ (without .sh)'
+        required: false
+        default: 'smoke'
+      activities:
+        description: 'Space-separated activities for the diagnose flow, e.g. ".MainActivity .client.ForgeActivity"'
+        required: false
+        default: ''
+      api_level:
+        description: 'Android API level'
+        required: false
+        default: '34'
+  workflow_call:
+    inputs:
+      apk_url: { required: false, type: string, default: '' }
+      artifact_run_id: { required: false, type: string, default: '' }
+      package: { required: true, type: string }
+      flow: { required: false, type: string, default: 'smoke' }
+      activities: { required: false, type: string, default: '' }
+      api_level: { required: false, type: string, default: '34' }
+    secrets:
+      TELEGRAM_BOT_TOKEN: { required: false }
+      TELEGRAM_CHAT_ID: { required: false }
+
+concurrency:
+  # Keyed by what is being tested, not by workflow name. A group of just the ref
+  # means one dispatch silently cancels another of the same app — a mistake the
+  # iOS harness made twice.
+  group: android-test-${{ inputs.package }}-${{ inputs.flow }}-${{ inputs.api_level }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      PACKAGE: ${{ inputs.package }}
+      FLOW: ${{ inputs.flow }}
+      ACTIVITIES: ${{ inputs.activities }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable KVM
+        run: |
+          # Without this the emulator falls back to software rendering and a
+          # four-minute sweep takes forty.
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Fetch APK from a build run
+        if: inputs.artifact_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Artifacts are not publicly fetchable — curl on the UI link returns
+          # HTML. gh keeps the binary private too.
+          mkdir -p app_dir
+          gh run download "${{ inputs.artifact_run_id }}" --repo "${{ github.repository }}" --dir app_dir
+          for z in app_dir/*.zip app_dir/*/*.zip; do
+            [ -f "$z" ] && unzip -oq "$z" -d app_dir/
+          done
+          true
+
+      - name: Download APK
+        run: |
+          set -euo pipefail
+          mkdir -p app_dir
+          if [ -n "${{ inputs.apk_url }}" ]; then
+            curl -fSL "${{ inputs.apk_url }}" -o app_dir/app.apk
+          fi
+          APK=$(find app_dir -name '*.apk' | head -n1)
+          [ -n "$APK" ] || { echo "::error::no .apk found"; exit 1; }
+          echo "APK=$APK" >> "$GITHUB_ENV"
+          ls -la "$APK"
+
+      - name: Prepare report dir
+        run: |
+          set -euo pipefail
+          TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+          REPORT_DIR="report_${TIMESTAMP}"
+          mkdir -p "$REPORT_DIR/screenshots" "$REPORT_DIR/logs"
+          echo "REPORT_DIR=$REPORT_DIR" >> "$GITHUB_ENV"
+          echo "TIMESTAMP=$TIMESTAMP" >> "$GITHUB_ENV"
+
+      - name: Boot emulator and run flow
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ inputs.api_level }}
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          ram-size: 4096M
+          disable-animations: false   # animations are the thing being filmed
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: |
+            set +e   # this step inspects its own failure; bash -e would hide it
+            adb wait-for-device
+            adb shell settings put global window_animation_scale 1.0
+            adb install -r -g "$APK" || { echo "::error::install failed"; exit 1; }
+            adb logcat -c
+            chmod +x scripts/lib.sh "flows/${FLOW}.sh"
+            ./flows/"${FLOW}".sh
+            rc=$?
+            adb logcat -d > "${REPORT_DIR}/logs/full_logcat.txt" 2>/dev/null
+            exit $rc
+
+      - name: Package report
+        if: always()
+        run: |
+          set +e
+          [ -n "${REPORT_DIR:-}" ] || { REPORT_DIR="report_orphan"; mkdir -p "$REPORT_DIR"; }
+          ARCHIVE="debug_report_${TIMESTAMP:-orphan}.zip"
+          zip -qr "$ARCHIVE" "$REPORT_DIR"
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+          exit 0
+
+      - name: Send report to Telegram
+        if: always()
+        run: |
+          set +e
+          [ -f "${ARCHIVE:-}" ] || { echo "no archive"; exit 0; }
+          [ -n "${TELEGRAM_BOT_TOKEN:-}" ] || { echo "no telegram secrets"; exit 0; }
+          ICON='❌'; [ "${{ job.status }}" = success ] && ICON='✅'
+          curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
+            -F chat_id="${TELEGRAM_CHAT_ID}" -F document="@${ARCHIVE}" \
+            -F caption="${ICON} ${{ job.status }} · ${PACKAGE} · flow ${FLOW}" -o /dev/null
+          exit 0
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-report-${{ env.TIMESTAMP || github.run_id }}
+          path: ${{ env.ARCHIVE || 'report_*' }}
+          if-no-files-found: warn
+          retention-days: 14
