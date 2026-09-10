@@ -133,6 +133,20 @@ jobs:
             adb wait-for-device
             adb shell settings put global window_animation_scale 1.0
             adb install -r -g "$APK" || { echo "::error::install failed"; exit 1; }
+
+            # Verify the id we were GIVEN matches what actually installed. A debug
+            # build usually carries an applicationIdSuffix (".debug"), so the apk
+            # installs under a different package than the release one — and every
+            # adb command then silently targets nothing. Without this check the
+            # symptom is a screenshot of the launcher and no explanation.
+            if ! adb shell pm list packages | tr -d '\r' | grep -qx "package:${PACKAGE}"; then
+              echo "::error::'${PACKAGE}' is not installed. The APK registered as:"
+              adb shell pm list packages -3 | tr -d '\r' | sed 's/^package:/  /'
+              echo "Re-run with -f package=<one of those>."
+              exit 1
+            fi
+            echo "package present: ${PACKAGE}"
+
             adb logcat -c
             chmod +x scripts/lib.sh "flows/${FLOW}.sh"
             ./flows/"${FLOW}".sh
