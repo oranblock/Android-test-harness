@@ -1,0 +1,17 @@
+{
+  "name": "android-test-harness",
+  "description": "Build and RUN an Android app on an emulator in GitHub Actions — compile a private Kotlin/KMP project on free Linux runners, install the APK, tap through it, screenshot every step, and report to Telegram, a GitHub issue, or a secret gist. Use when asked to test an Android app in CI, get screenshots or video of an Android app, diagnose which screens crash, or when no device is available. Repo: oranblock/Android-test-harness.",
+  "version": "1.0.0",
+  "author": {
+    "name": "oranblock",
+    "url": "https://github.com/oranblock/Android-test-harness"
+  },
+  "homepage": "https://github.com/oranblock/Android-test-harness",
+  "keywords": [
+    "ci",
+    "testing",
+    "github-actions",
+    "mobile",
+    "screenshots"
+  ]
+}

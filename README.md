@@ -15,13 +15,27 @@ flows/diagnose.sh                       start EVERY activity, prove each survive
 flows/video.sh                          burst-capture frames: is it actually animating?
 ```
 
+## Install as a Claude Code plugin
+
+This repo is also a Claude Code plugin. It ships the `android-test-harness` skill, which
+carries the hard-won CI facts — the failures that cost a round each — so Claude
+drives these workflows correctly instead of rediscovering them.
+
+```
+/plugin marketplace add oranblock/Android-test-harness
+/plugin install android-test-harness@android-test-harness
+```
+
+The skill loads on its own when you ask to test, screenshot or diagnose an app in
+CI. `skills/android-test-harness/SKILL.md` is readable on its own if you would rather just read it.
+
 ## Why this beats the iOS harness
 
 | | Android | iOS |
 | :--- | :--- | :--- |
 | runner cost | **ubuntu, 1×** | macOS, 10× on private repos |
 | taps / typing / swipes | **work** (`adb shell input`) | idb will not install in CI |
-| rotation | **works** | not available |
+| rotation | **works, when the activity allows it** (`rotate` reports UNCHANGED for an orientation-locked one) | not available |
 | launch a specific screen | **`am start`**, any exported activity | only if the app reads a launch env var |
 | crash detail | **full Java stack in logcat** | an abort with a native backtrace |
 | GPU | swiftshader; most things render | Metal works, but **Filament cannot run at all** |
