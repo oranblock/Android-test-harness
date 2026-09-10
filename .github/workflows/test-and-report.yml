@@ -136,7 +136,15 @@ jobs:
             # The artifact is the reliable channel, so write to it first.
             set +e
             mkdir -p "${REPORT_DIR}/logs"
-            exec > >(tee -a "${REPORT_DIR}/logs/flow.txt") 2>&1
+            # PLAIN redirect, not `exec > >(tee ...)`. This action runs `script:`
+            # under /usr/bin/sh (dash), where process substitution is a syntax
+            # error — "Syntax error: redirection unexpected" on line 1, which
+            # killed the run before a single command executed. dash is also why
+            # nothing here may use [[ ]], arrays, or ${var/a/b}.
+            #
+            # Sending output only to the file is fine: this step's stdout does not
+            # reach `gh run view --log` anyway, so the artifact is the real channel.
+            exec >> "${REPORT_DIR}/logs/flow.txt" 2>&1
 
             echo "=== device ==="
             adb wait-for-device
