@@ -128,51 +128,11 @@ jobs:
           ram-size: 4096M
           disable-animations: false   # animations are the thing being filmed
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
-          script: |
-            # Everything this step prints goes to a FILE inside REPORT_DIR as well
-            # as stdout. The emulator-runner action wraps the script such that its
-            # output does not survive into `gh run view --log`, so a failure here
-            # was invisible: an empty 350-byte report and no way to see why.
-            # The artifact is the reliable channel, so write to it first.
-            set +e
-            mkdir -p "${REPORT_DIR}/logs"
-            # PLAIN redirect, not `exec > >(tee ...)`. This action runs `script:`
-            # under /usr/bin/sh (dash), where process substitution is a syntax
-            # error — "Syntax error: redirection unexpected" on line 1, which
-            # killed the run before a single command executed. dash is also why
-            # nothing here may use [[ ]], arrays, or ${var/a/b}.
-            #
-            # Sending output only to the file is fine: this step's stdout does not
-            # reach `gh run view --log` anyway, so the artifact is the real channel.
-            exec >> "${REPORT_DIR}/logs/flow.txt" 2>&1
-
-            echo "=== device ==="
-            adb wait-for-device
-            adb shell getprop ro.build.version.sdk
-            adb shell settings put global window_animation_scale 1.0
-
-            echo "=== install ==="
-            adb install -r -g "$APK"
-            install_rc=$?
-            echo "install rc=$install_rc"
-
-            echo "=== third-party packages ==="
-            adb shell pm list packages -3 | tr -d '\r'
-
-            if ! adb shell pm list packages | tr -d '\r' | grep -qx "package:${PACKAGE}"; then
-              echo "::error::'${PACKAGE}' is not installed — see the package list above"
-              exit 1
-            fi
-            echo "package present: ${PACKAGE}"
-
-            echo "=== flow: ${FLOW} ==="
-            adb logcat -c
-            chmod +x scripts/lib.sh "flows/${FLOW}.sh"
-            ./flows/"${FLOW}".sh
-            rc=$?
-            echo "=== flow rc=$rc ==="
-            adb logcat -d > "${REPORT_DIR}/logs/full_logcat.txt" 2>/dev/null
-            exit $rc
+          # ONE line, on purpose. This action splits `script:` on newlines and
+          # runs each line as a separate `/usr/bin/sh -c`, so variables, `$?`,
+          # multi-line `if` and `exec` redirects do not work inline. See the
+          # comment block at the top of that file.
+          script: ./scripts/run-in-emulator.sh
 
       - name: Package report
         if: always()
