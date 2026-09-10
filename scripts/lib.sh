@@ -154,6 +154,28 @@ report_screens() {
   echo "all screens survived launch"
 }
 
+# rotate <0|1> [name] — request an orientation and REPORT WHETHER IT HAPPENED.
+#
+# Setting user_rotation is a request, not a result. An activity declaring
+# android:screenOrientation="sensorPortrait" (every screen in Skirmish except
+# the battle) ignores it completely, and the sweep then files two identical
+# screenshots under the names "landscape" and "portrait" — a green run that
+# proves nothing. So compare the reported size and say which it was.
+rotate() {
+  local want="$1" name="${2:-rotation}"
+  local before after
+  before=$(adb shell wm size 2>/dev/null | tr -d '\r' | tail -1)
+  adb shell settings put system accelerometer_rotation 0
+  adb shell settings put system user_rotation "$want"
+  sleep "${ROTATE_SETTLE:-3}"
+  after=$(adb shell wm size 2>/dev/null | tr -d '\r' | tail -1)
+  if [ "$before" = "$after" ]; then
+    send_step "$name" "orientation UNCHANGED ($after) — activity is probably orientation-locked"
+  else
+    send_step "$name" "rotated: $before -> $after"
+  fi
+}
+
 # --- motion ------------------------------------------------------------------
 
 # record_clip <seconds> <name> — burst of screencaps, not screenrecord.

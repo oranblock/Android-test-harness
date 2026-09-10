@@ -20,14 +20,11 @@ sleep 2
 launch "resumed"
 assert_running "after_resume"
 
-# Rotation shakes out layout crashes. On Android this actually runs, unlike iOS CI.
-adb shell settings put system accelerometer_rotation 0
-adb shell settings put system user_rotation 1
-sleep 3
-send_step "landscape"
-adb shell settings put system user_rotation 0
-sleep 3
-send_step "portrait"
+# Rotation shakes out layout crashes. On Android this actually runs, unlike iOS
+# CI — but only for activities that allow it. rotate() says which happened, so a
+# locked activity reads as "UNCHANGED" instead of as a passing rotation test.
+rotate 1 "landscape"
+rotate 0 "portrait"
 
 assert_running "final"
 echo "== smoke complete =="
