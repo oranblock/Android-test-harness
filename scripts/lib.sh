@@ -9,7 +9,16 @@
 # work on Android CI. There is no third-party tool to install and no companion
 # process to connect — `adb shell input` is part of the platform.
 
-set -euo pipefail
+# NOT -e. A flow is an evidence-gathering script, and every probe in it runs a
+# command that legitimately returns non-zero — `pidof` on a dead process, `grep`
+# with no match. Under -e any of those ends the sweep before it can photograph
+# what went wrong, which is exactly what happened in run 34532362398: the app
+# had launched and was drawing frames, and the harness reported a failure with
+# one screenshot and no reason.
+#
+# Failure is signalled explicitly instead: assert_running returns 1, flows end
+# with `report_screens`, and the workflow propagates the flow's exit code.
+set -uo pipefail
 
 : "${PACKAGE:?PACKAGE not set — run this from the workflow}"
 : "${REPORT_DIR:?REPORT_DIR not set}"
@@ -88,15 +97,34 @@ launch_activity() {
   send_step "$name"
 }
 
+# pid_of — echoes the app's pid, or nothing. Never fails.
+#
+# `pidof` exits 1 when the process is absent, which is information, not an
+# error. `ps -A` is the fallback: pidof matches the process NAME, and a process
+# renamed by android:process= or truncated to 15 chars can hide from it.
+pid_of() {
+  local pid
+  pid=$(adb shell pidof "$PACKAGE" 2>/dev/null | tr -d '\r')
+  if [ -z "$pid" ]; then
+    pid=$(adb shell ps -A 2>/dev/null | tr -d '\r' | grep -F " $PACKAGE" | awk '{print $2}' | head -1)
+  fi
+  echo "$pid"
+}
+
 # assert_running [name] — the cheapest true assertion: is the process alive?
 assert_running() {
-  if [ -n "$(adb shell pidof "$PACKAGE" 2>/dev/null | tr -d '\r')" ]; then
-    send_step "${1:-still_running}" "process alive"
-  else
-    send_step "${1:-CRASHED}" "⚠️ process is GONE"
-    echo "::error::$PACKAGE is not running after step ${STEP_N}"
-    return 1
+  local pid
+  pid=$(pid_of)
+  if [ -n "$pid" ]; then
+    send_step "${1:-still_running}" "process alive (pid $pid)"
+    return 0
   fi
+  send_step "${1:-CRASHED}" "⚠️ process is GONE"
+  echo "::error::$PACKAGE is not running after step ${STEP_N}"
+  # Say what the device saw, so a probe bug is distinguishable from a crash.
+  echo "--- top-of-stack ---"
+  adb shell dumpsys activity activities 2>/dev/null | grep -m3 -i "mResumedActivity\|topResumedActivity" | tr -d '\r'
+  return 1
 }
 
 # visit <activity> [name] — launch a screen, record whether it survived, continue
@@ -107,7 +135,7 @@ visit() {
     *"Permission Denial"*|*"does not exist"*)
       echo "     skipped: $name (not exported)"; return 0 ;;
   esac
-  if [ -n "$(adb shell pidof "$PACKAGE" 2>/dev/null | tr -d '\r')" ]; then
+  if [ -n "$(pid_of)" ]; then
     echo "     ok: $name"
   else
     echo "     CRASHED: $name"
@@ -191,4 +219,4 @@ record_clip() {
 }
 
 # A flow that dies should still leave evidence.
-trap 'rc=$?; [ $rc -ne 0 ] && send_step "FAILURE_final_frame" "exit $rc" || true' EXIT
+trap 'rc=$?; if [ $rc -ne 0 ]; then send_step "FAILURE_final_frame" "exit $rc"; fi; exit $rc' EXIT
