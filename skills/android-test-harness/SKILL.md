@@ -174,6 +174,31 @@ exists, not that it opens.
 - **Skipped frames on the emulator** (`Choreographer: Skipped 230 frames!`) are a
   software-GPU artifact, not a signal about the app.
 
+## Prefer the non-destructive command
+
+Debugging CI means scratch directories and dirty working trees, and the quick
+cleanup is usually the one that loses something.
+
+| reaching for | use instead | because |
+| :--- | :--- | :--- |
+| `rm -rf scratch && mkdir scratch` | a **new** directory name | nothing to recover if the path expanded wrong |
+| `git checkout -- .` | `git restore <path>` | `.` discards every unrelated edit in the tree |
+| discarding to unblock a pull | `git stash push <path>` then `stash pop` | keeps work that exists nowhere else |
+
+The cost is not hypothetical. A `git checkout -- .` run to unblock a `git pull`
+would have wiped an **uncommitted** `wrangler.toml` holding a KV namespace id and
+a chat allowlist — values deliberately not committed, and therefore stored
+nowhere else. `git stash push worker/wrangler.toml`, pull, `stash pop` kept them.
+
+Rule: before deleting or overwriting, look at the target first. When a command
+deletes, overwrites, force-pushes or rewrites history, say out loud what it
+touches and how to undo it **before** running it, not after something is gone.
+
+Specific to this harness: `gh run download` creates a **directory** named after
+the artifact with the file inside, which is why `adb` once failed with
+`copy_to_file: ...apk: Is a directory`. Use `find -type f`, and never build an
+`rm -rf` out of a path you have not printed.
+
 ## Telegram
 
 A bot token from @BotFather is static — no OTP, no session, no login. That is the
